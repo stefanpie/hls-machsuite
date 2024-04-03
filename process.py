@@ -86,17 +86,17 @@ KERNEL_PATHS = [
 
 
 def main(args):
-    n_jobs = args.jobs
+    n_jobs: int = args.jobs
 
-    benchmark_distribution_fp = args.benchmark_distribution
-    output_dir = args.output_directory
+    benchmark_distribution_fp: Path = args.benchmark_distribution
+    output_dir: Path = args.output_directory
     if output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_file = args.output_file
+    output_file: Path = args.output_file
 
-    vitis_hls_include_dir = get_vitis_hls_include_dir()
-    vitis_clang_pp_bin_path = get_vitis_hls_clang_pp_path()
+    # vitis_hls_include_dir = get_vitis_hls_include_dir()
+    # vitis_clang_pp_bin_path = get_vitis_hls_clang_pp_path()
 
     if not benchmark_distribution_fp.exists():
         raise FileNotFoundError(
@@ -175,30 +175,57 @@ def main(args):
         shutil.copy(kern_h_fp, new_benchmark_dir)
         shutil.copy(kern_c_fp, new_benchmark_dir)
 
-        new_h_fp = new_benchmark_dir / f"{var_kern}.h"
-        new_c_fp = new_benchmark_dir / f"{var_kern}.c"
-
-        # cleaning the header file
-        h_text = new_h_fp.read_text()
-
-        line_idx = None
-        for i, line in enumerate(h_text.splitlines()):
-            if len(line) >= 8 and line.startswith("/" * 8):
-                line_idx = i
-                break
-        if line_idx is not None:
-            h_text = "\n".join(h_text.splitlines()[:line_idx])
-
-        # remove "#include "support.h"
-        h_text = h_text.replace('#include "support.h"', "")
-
-        new_h_fp.write_text(h_text)
-
-        # preprocess the header file with
+        new_h_fp: Path = new_benchmark_dir / f"{var_kern}.h"
+        new_c_fp: Path = new_benchmark_dir / f"{var_kern}.c"
 
         # rename to be cpp inssted of c
         new_kern_cpp_fp = new_benchmark_dir / f"{var_kern}.cpp"
         os.rename(new_benchmark_dir / f"{var_kern}.c", new_kern_cpp_fp)
+        new_c_fp = new_kern_cpp_fp
+
+        # rename both to be full name
+        os.rename(new_h_fp, new_benchmark_dir / f"{kernel_full_name}.h")
+        os.rename(new_c_fp, new_benchmark_dir / f"{kernel_full_name}.cpp")
+        new_h_fp = new_benchmark_dir / f"{kernel_full_name}.h"
+        new_c_fp = new_benchmark_dir / f"{kernel_full_name}.cpp"
+
+        # cleaning the header file
+        h_text = new_h_fp.read_text()
+
+        # line_idx = None
+        # for i, line in enumerate(h_text.splitlines()):
+        #     if len(line) >= 8 and line.startswith("/" * 8):
+        #         line_idx = i
+        #         break
+        # if line_idx is not None:
+        #     h_text = "\n".join(h_text.splitlines()[:line_idx])
+
+        # remove any lines with more than 8 slashes in a row
+        h_text = "\n".join(
+            line
+            for line in h_text.splitlines()
+            if len(line) < 8 or not line.startswith("/" * 8)
+        )
+        h_text = h_text.replace("// Test harness interface code.", "")
+
+        h_text = re.sub(r"struct bench_args_t {(.|\s)*};", "", h_text)
+
+        # remove "#include "support.h"
+        h_text = h_text.replace('#include "support.h"', "")
+
+        # add stdint.h to top of file
+        h_text = "#include <stdint.h>\n\n" + h_text
+
+        new_h_fp.write_text(h_text)
+
+        # cleaning the cpp file
+        c_text = new_c_fp.read_text()
+        c_text = c_text.replace(
+            f'#include "{var_kern}.h"', f'#include "{kernel_full_name}.h"'
+        )
+        new_c_fp.write_text(c_text)
+
+        # preprocess the header file with
 
         # copy common.h into each kernel
         # common_h_fp = tmp_dir / "common" / "support.h"
@@ -226,6 +253,18 @@ def main(args):
 
         new_hls_dir_fp = new_benchmark_dir / (hls_dir_fp.name + ".tcl")
         os.rename(new_benchmark_dir / hls_dir_fp.name, new_hls_dir_fp)
+
+        # find function defitions in heder
+        RE_FUNC_DEF = re.compile(r"^(?!#define).+\w+ (\w+)\((.|\s)*?\);", re.MULTILINE)
+        func_def_matches = list(RE_FUNC_DEF.finditer(h_text))
+        if len(func_def_matches) == 0:
+            raise ValueError(f"No function definitions found in {new_h_fp}")
+        top_fn_name = func_def_matches[-1].group(1).strip()
+        print(top_fn_name)
+
+        # make a top.txt
+        top_txt_fp = new_benchmark_dir / "top.txt"
+        top_txt_fp.write_text(top_fn_name)
 
     Parallel(n_jobs=n_jobs)(
         delayed(process_benchmark)(benchmark) for benchmark in source_benchmark_dirs
