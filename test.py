@@ -67,6 +67,64 @@ def hls_synth_benchmark(
     return p.returncode
 
 
+def compile_and_run_benchmark(
+    benchmark_directory: Path, temp_dir_overide: Path | None = None
+) -> tuple[int, int | None]:
+    benchmark_name = benchmark_directory.stem
+
+    if temp_dir_overide is None:
+        temp_dir = tempfile.TemporaryDirectory()
+        temp_dir_path = Path(temp_dir.name)
+    else:
+        temp_dir_path = temp_dir_overide / benchmark_name
+        temp_dir_path.mkdir(exist_ok=True, parents=True)
+
+    benchmark_name = benchmark_directory.stem
+    benchmark_name_c = benchmark_name.replace("-", "_")
+
+    top_fn_fp = benchmark_directory / "top.txt"
+    top_fn = top_fn_fp.read_text().strip()
+
+    all_files = list(benchmark_directory.glob("*"))
+    for file in all_files:
+        shutil.copy(file, temp_dir_path)
+
+    print(f"Running HLS Synthesis : {benchmark_name} : {temp_dir_path}")
+
+    makefile = temp_dir_path / "Makefile"
+    makefile_txt = ""
+    makefile_txt += f"CC = {get_vitis_hls_clang_pp_path()}\n"
+    makefile_txt += f"CFLAGS = -I{get_vitis_hls_include_dir()}\n"
+    makefile_txt += f"all: {benchmark_name}\n"
+    makefile_txt += f"{benchmark_name}: {benchmark_name}.cpp {benchmark_name}.h\n"
+    makefile_txt += f"\t$(CC) $(CFLAGS) -o {benchmark_name} {benchmark_name}.cpp  \n"
+    makefile.write_text(makefile_txt)
+
+    p_compile = subprocess.run(
+        ["make"],
+        cwd=temp_dir_path,
+        text=True,
+        capture_output=True,
+    )
+    print(f"compile - {benchmark_name} - {p_compile.returncode}")
+
+    if p_compile.returncode == 0:
+        p_run = subprocess.run(
+            [temp_dir_path / benchmark_name],
+            cwd=temp_dir_path,
+            text=True,
+            capture_output=True,
+        )
+        print(f"run - {benchmark_name} - {p_run.returncode}")
+        if p_run.returncode != 0:
+            print(f"Failed to run {benchmark_name}")
+        return (p_compile.returncode, p_run.returncode)
+    else:
+        print(f"Failed to compile {benchmark_name}")
+        print(p_compile.stderr)
+        return p_compile.returncode, None
+
+
 def get_vitis_hls_include_dir() -> Path:
     vitis_hls_bin_path_str = shutil.which("vitis_hls")
     if vitis_hls_bin_path_str is None:
@@ -125,15 +183,30 @@ def main(args):
 
     benchmarks_to_test = [benchmark for benchmark in benchmarks]
 
-    ### HLS Synthesis ###
-    return_data_hls = joblib.Parallel(n_jobs=n_jobs, backend="multiprocessing")(
-        joblib.delayed(hls_synth_benchmark)(benchmark, temp_dir_overide=temp_dir_synth)
+    ### Compile and Run ###
+    return_data_compile_run = joblib.Parallel(n_jobs=n_jobs, backend="multiprocessing")(
+        joblib.delayed(compile_and_run_benchmark)(
+            benchmark, temp_dir_overide=temp_dir_compile
+        )
         for benchmark in benchmarks_to_test
     )
-    return_codes_hls_synthesis = return_data_hls
-    for return_code, benchmark in zip(return_codes_hls_synthesis, benchmarks_to_test):
-        if return_code != 0:
-            print(f"Failed to synthesize benchmark {benchmark.name}")
+    for (return_code_compile, return_code_run), benchmark in zip(
+        return_data_compile_run, benchmarks_to_test
+    ):
+        if return_code_compile != 0:
+            print(f"Failed to compile benchmark {benchmark.name}")
+        if return_code_run is not None and return_code_run != 0:
+            print(f"Failed to run benchmark {benchmark.name}")
+
+    ### HLS Synthesis ###
+    # return_data_hls = joblib.Parallel(n_jobs=n_jobs, backend="multiprocessing")(
+    #     joblib.delayed(hls_synth_benchmark)(benchmark, temp_dir_overide=temp_dir_synth)
+    #     for benchmark in benchmarks_to_test
+    # )
+    # return_codes_hls_synthesis = return_data_hls
+    # for return_code, benchmark in zip(return_codes_hls_synthesis, benchmarks_to_test):
+    #     if return_code != 0:
+    #         print(f"Failed to synthesize benchmark {benchmark.name}")
 
 
 if __name__ == "__main__":
